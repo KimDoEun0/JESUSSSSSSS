@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ASCII Christmas Tree</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #0b0f1a; overflow: hidden; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+
+let FONT_PX, CW, CH, cols, rows;
+let depthBuf, charBuf, colorBuf;
+let points = [], snow = [];
+let last = performance.now() / 1000;
+
+const LEAF = ".:-=+*x%#&@";
+const LIGHT_COLORS = [[255,80,80],[255,200,90],[90,140,255],[255,255,255],[255,120,220]];
+
+// ---------- 1. 화면 크기 / 문자 그리드 ----------
+function resize() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  FONT_PX = innerWidth < 600 ? 10 : 14;
+  canvas.width = innerWidth * dpr;
+  canvas.height = innerHeight * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.font = `${FONT_PX}px Consolas, Menlo, "DejaVu Sans Mono", "Courier New", monospace`;
+  ctx.textBaseline = 'top';
+  CW = ctx.measureText('M').width;
+  CH = FONT_PX * 1.05;
+  cols = Math.ceil(innerWidth / CW);
+  rows = Math.ceil(innerHeight / CH);
+  depthBuf = new Float32Array(cols * rows);
+  charBuf  = new Array(cols * rows);
+  colorBuf = new Array(cols * rows);
+  initSnow();
+}
+
+// ---------- 2. 트리 3D 점 생성 ----------
+function buildTree() {
+  points = [];
+  // 잎 (층이 진 원뿔)
+  for (let i = 0; i < 3000; i++) {
+    const y = 0.06 + Math.pow(Math.random(), 0.8) * 0.94; // 0=꼭대기, 1=바닥
+    const layer = (y * 6) % 1;                             // 층 모양
+    const r = 0.42 * y * (0.75 + 0.25 * layer) * (0.8 + 0.2 * Math.random());
+    const a = Math.random() * Math.PI * 2;
+    const isLight = Math.random() < 0.05;
+    points.push({
+      x: Math.cos(a) * r, y, z: Math.sin(a) * r,
+      type: isLight ? 'light' : 'leaf',
+      g: 120 + Math.random() * 100,
+      color: LIGHT_COLORS[(Math.random() * LIGHT_COLORS.length) | 0],
+      phase: Math.random() * 6.28
+    });
+  }
+  // 나선형 전구 줄
+  const M = 260, turns = 6;
+  for (let i = 0; i < M; i++) {
+    const t = i / M, y = 0.08 + t * 0.9, r = 0.42 * y * 1.02;
+    const a = t * turns * Math.PI * 2;
+    points.push({ x: Math.cos(a) * r, y, z: Math.sin(a) * r, type: 'light',
+      color: LIGHT_COLORS[i % LIGHT_COLORS.length], phase: Math.random() * 6.28 });
+  }
+  // 줄기
+  for (let i = 0; i < 150; i++) {
+    const y = 1.0 + Math.random() * 0.08, a = Math.random() * 6.28;
+    points.push({ x: Math.cos(a) * 0.04, y, z: Math.sin(a) * 0.04, type: 'trunk' });
+  }
+}
+
+// ---------- 3. 눈 입자 ----------
+function initSnow() {
+  snow = [];
+  const n = Math.floor(cols * rows * 0.03);
+  const chs = ['.', '.', '+', '*', "'"];
+  for (let i = 0; i < n; i++) {
+    const v = 2 + Math.random() * 6;           // 초당 이동 행 수
+    const b = Math.min(255, 70 + v * 22) | 0;  // 빠를수록 밝게(가까운 눈)
+    snow.push({ x: Math.random() * cols, y: Math.random() * rows, v,
+      ch: chs[(Math.random() * chs.length) | 0],
+      color: `rgb(${b},${b},${Math.min(255, b + 20)})`, phase: Math.random() * 6.28 });
+  }
+}
+
+function put(c, r, ch, color) {
+  if (c < 0 || c >= cols || r < 0 || r >= rows) return;
+  const i = r * cols + c;
+  charBuf[i] = ch; colorBuf[i] = color; depthBuf[i] = 1e9;
+}
+
+// ---------- 4. 매 프레임 렌더링 ----------
+function frame(now) {
+  const t = now / 1000;
+  const dt = Math.min(0.05, t - last); last = t;
+  const W = innerWidth, H = innerHeight;
+
+  depthBuf.fill(-1e9);
+  charBuf.fill(null);
+
+  // 눈 (가장 뒤)
+  for (const p of snow) {
+    p.y += p.v * dt;
+    p.x += Math.sin(t * 0.8 + p.phase) * p.v * 0.12 * dt;
+    if (p.y >= rows) { p.y -= rows; p.x = Math.random() * cols; }
+    if (p.x < 0) p.x += cols;
+    if (p.x >= cols) p.x -= cols;
+    const i = (p.y | 0) * cols + (p.x | 0);
+    charBuf[i] = p.ch; colorBuf[i] = p.color;
+  }
+
+  // 트리 (Y축 회전 + 원근 투영 + z-버퍼)
+  const treePx = Math.min(H * 0.75, W * 1.05);
+  const cx = W / 2, top = (H - treePx * 1.12) / 2;
+  const ang = t * 0.7, ca = Math.cos(ang), sa = Math.sin(ang);
+
+  for (const p of points) {
+    const xr = p.x * ca + p.z * sa;
+    const zr = -p.x * sa + p.z * ca;
+    const persp = 2.5 / (2.5 - zr);
+    const c = ((cx + xr * treePx * persp) / CW) | 0;
+    const r = ((top + p.y * treePx) / CH) | 0;
+    if (c < 0 || c >= cols || r < 0 || r >= rows) continue;
+    const i = r * cols + c;
+    if (zr <= depthBuf[i]) continue;
+    depthBuf[i] = zr;
+
+    const k = Math.max(0, Math.min(1, 0.5 + zr / 0.9 + xr * 0.6)); // 앞쪽·측면 밝기
+
+    if (p.type === 'leaf') {
+      charBuf[i] = LEAF[Math.min(LEAF.length - 1, (k * LEAF.length) | 0)];
+      const b = 0.25 + 0.75 * k;
+      colorBuf[i] = `rgb(${(30 + p.g * 0.25) * b | 0},${p.g * b | 0},${(40 + p.g * 0.2) * b | 0})`;
+    } else if (p.type === 'light') {
+      const tw = 0.55 + 0.45 * Math.sin(t * 4 + p.phase);   // 깜빡임
+      const b = (0.3 + 0.7 * k) * tw + 0.15;
+      charBuf[i] = tw > 0.7 ? '@' : (tw > 0.4 ? 'o' : '*');
+      const [R, G, B] = p.color;
+      colorBuf[i] = `rgb(${Math.min(255, R * b) | 0},${Math.min(255, G * b) | 0},${Math.min(255, B * b) | 0})`;
+    } else {
+      charBuf[i] = k > 0.5 ? '#' : '|';
+      const b = 0.35 + 0.65 * k;
+      colorBuf[i] = `rgb(${150 * b | 0},${95 * b | 0},${55 * b | 0})`;
+    }
+  }
+
+  // 꼭대기 별 (회전축 위라 고정)
+  const sc = (cx / CW) | 0, sr = ((top + 0.02 * treePx) / CH) | 0;
+  const pulse = 0.7 + 0.3 * Math.sin(t * 3);
+  const yel = `rgb(${255 * pulse | 0},${210 * pulse | 0},${90 * pulse | 0})`;
+  const dim = `rgb(${200 * pulse | 0},${160 * pulse | 0},${70 * pulse | 0})`;
+  [[-1,-1,'\\'],[0,-1,'|'],[1,-1,'/'],[-2,0,'-'],[-1,0,'-'],[1,0,'-'],[2,0,'-'],
+   [-1,1,'/'],[1,1,'\\']].forEach(([dx, dy, ch]) => put(sc + dx, sr + dy, ch, dim));
+  put(sc, sr, '*', yel);
+
+  // 화면 출력
+  ctx.fillStyle = '#0b0f1a';
+  ctx.fillRect(0, 0, W, H);
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const i = r * cols + c, ch = charBuf[i];
+      if (!ch) continue;
+      ctx.fillStyle = colorBuf[i];
+      ctx.fillText(ch, c * CW, r * CH);
+    }
+  }
+  requestAnimationFrame(frame);
+}
+
+addEventListener('resize', resize);
+resize();
+buildTree();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
