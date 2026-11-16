@@ -5,124 +5,195 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ASCII Christmas Tree</title>
 <style>
-  html, body { margin: 0; height: 100%; background: #0b0f1a; overflow: hidden; }
-  canvas { display: block; width: 100vw; height: 100vh; }
+  html, body { margin: 0; height: 100%; background: #05060f; overflow: hidden; touch-action: manipulation; }
+  canvas { display: block; width: 100vw; height: 100vh; cursor: pointer; }
 </style>
 </head>
 <body>
 <canvas id="c"></canvas>
 <script>
+// ================= 여기만 바꾸면 됩니다 =================
+const CONFIG = {
+  mainText: "MERRY CHRISTMAS",              // 큰 무지개 문구 (영문 대문자 권장)
+  subText:  "2026",                          // 아래 금색 문구
+  message:  "화면을 눌러 불꽃을 터뜨려 보세요", // 맨 아래 작은 문구 ("" 이면 숨김)
+  rotateSpeed: 0.7,                          // 트리 회전 속도
+  snowDensity: 0.025,                        // 눈 양
+  autoFireworks: true                        // 자동 불꽃놀이
+};
+// ========================================================
+
 const canvas = document.getElementById('c');
 const ctx = canvas.getContext('2d');
+const MONO = 'Consolas, Menlo, "DejaVu Sans Mono", "Courier New", monospace';
 
-let FONT_PX, CW, CH, cols, rows;
-let depthBuf, charBuf, colorBuf;
-let points = [], snow = [];
-let last = performance.now() / 1000;
+let FONT_PX, CW, CH, cols, rows, bgGrad;
+let depthBuf, charBuf, colorBuf, glowBuf;
+let points = [], snowBack = [], snowFront = [], bgStars = [], fireworks = [];
+let last = performance.now() / 1000, startT = last, nextFw = last + 2;
 
 const LEAF = ".:-=+*x%#&@";
-const LIGHT_COLORS = [[255,80,80],[255,200,90],[90,140,255],[255,255,255],[255,120,220]];
+const ORN = [[255,70,70],[255,200,80],[80,150,255],[255,255,255],[255,110,210],[120,255,200]];
+const pick = a => a[(Math.random() * a.length) | 0];
 
-// ---------- 1. 화면 크기 / 문자 그리드 ----------
+// ---------- 화면 / 그리드 ----------
 function resize() {
-  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const dpr = Math.min(devicePixelRatio || 1, 2);
   FONT_PX = innerWidth < 600 ? 10 : 14;
   canvas.width = innerWidth * dpr;
   canvas.height = innerHeight * dpr;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.font = `${FONT_PX}px Consolas, Menlo, "DejaVu Sans Mono", "Courier New", monospace`;
-  ctx.textBaseline = 'top';
+  ctx.font = `${FONT_PX}px ${MONO}`;
   CW = ctx.measureText('M').width;
   CH = FONT_PX * 1.05;
   cols = Math.ceil(innerWidth / CW);
   rows = Math.ceil(innerHeight / CH);
-  depthBuf = new Float32Array(cols * rows);
-  charBuf  = new Array(cols * rows);
-  colorBuf = new Array(cols * rows);
-  initSnow();
+  const n = cols * rows;
+  depthBuf = new Float32Array(n);
+  charBuf = new Array(n);
+  colorBuf = new Array(n);
+  glowBuf = new Uint8Array(n);
+  bgGrad = ctx.createLinearGradient(0, 0, 0, innerHeight);
+  bgGrad.addColorStop(0, '#03040c');
+  bgGrad.addColorStop(0.6, '#0b0f24');
+  bgGrad.addColorStop(1, '#1c1033');
+  initSky();
 }
 
-// ---------- 2. 트리 3D 점 생성 ----------
+// ---------- 별 / 눈 ----------
+function initSky() {
+  bgStars = []; snowBack = []; snowFront = [];
+  const area = cols * rows;
+  for (let i = 0; i < area * 0.012; i++)
+    bgStars.push({ c: (Math.random() * cols) | 0, r: (Math.random() * rows * 0.8) | 0,
+      ch: pick(['.', '·', '+', '.']), ph: Math.random() * 6.28, sp: 0.5 + Math.random() * 2 });
+  for (let i = 0; i < area * CONFIG.snowDensity; i++)
+    snowBack.push({ x: Math.random() * cols, y: Math.random() * rows, v: 1.5 + Math.random() * 3,
+      ch: pick(['.', '.', "'", '+']), ph: Math.random() * 6.28 });
+  for (let i = 0; i < area * CONFIG.snowDensity * 0.15; i++)
+    snowFront.push({ x: Math.random() * innerWidth, y: Math.random() * innerHeight,
+      v: 60 + Math.random() * 80, size: FONT_PX * (1.2 + Math.random() * 0.8),
+      ch: pick(['*', '+', '*']), ph: Math.random() * 6.28, a: 0.5 + Math.random() * 0.5 });
+}
+
+// ---------- 트리 3D 점 ----------
 function buildTree() {
   points = [];
-  // 잎 (층이 진 원뿔)
-  for (let i = 0; i < 3000; i++) {
-    const y = 0.06 + Math.pow(Math.random(), 0.8) * 0.94; // 0=꼭대기, 1=바닥
-    const layer = (y * 6) % 1;                             // 층 모양
+  for (let i = 0; i < 3200; i++) {
+    const y = 0.06 + Math.pow(Math.random(), 0.8) * 0.94;
+    const layer = (y * 6) % 1;
     const r = 0.42 * y * (0.75 + 0.25 * layer) * (0.8 + 0.2 * Math.random());
     const a = Math.random() * Math.PI * 2;
-    const isLight = Math.random() < 0.05;
-    points.push({
-      x: Math.cos(a) * r, y, z: Math.sin(a) * r,
-      type: isLight ? 'light' : 'leaf',
-      g: 120 + Math.random() * 100,
-      color: LIGHT_COLORS[(Math.random() * LIGHT_COLORS.length) | 0],
-      phase: Math.random() * 6.28
-    });
+    points.push({ x: Math.cos(a) * r, y, z: Math.sin(a) * r,
+      type: Math.random() < 0.045 ? 'orn' : 'leaf',
+      g: 110 + Math.random() * 110, color: pick(ORN), ph: Math.random() * 6.28 });
   }
-  // 나선형 전구 줄
-  const M = 260, turns = 6;
+  const M = 320, turns = 7;
   for (let i = 0; i < M; i++) {
-    const t = i / M, y = 0.08 + t * 0.9, r = 0.42 * y * 1.02;
-    const a = t * turns * Math.PI * 2;
-    points.push({ x: Math.cos(a) * r, y, z: Math.sin(a) * r, type: 'light',
-      color: LIGHT_COLORS[i % LIGHT_COLORS.length], phase: Math.random() * 6.28 });
+    const t = i / M, y = 0.07 + t * 0.92, r = 0.42 * y * 1.03, a = t * turns * Math.PI * 2;
+    points.push({ x: Math.cos(a) * r, y, z: Math.sin(a) * r, type: 'garland', idx: i });
   }
-  // 줄기
-  for (let i = 0; i < 150; i++) {
+  for (let i = 0; i < 160; i++) {
     const y = 1.0 + Math.random() * 0.08, a = Math.random() * 6.28;
-    points.push({ x: Math.cos(a) * 0.04, y, z: Math.sin(a) * 0.04, type: 'trunk' });
+    points.push({ x: Math.cos(a) * 0.045, y, z: Math.sin(a) * 0.045, type: 'trunk' });
   }
 }
 
-// ---------- 3. 눈 입자 ----------
-function initSnow() {
-  snow = [];
-  const n = Math.floor(cols * rows * 0.03);
-  const chs = ['.', '.', '+', '*', "'"];
+// ---------- 불꽃놀이 ----------
+function spawnFirework(x, y) {
+  const hue = Math.random() * 360, n = 40 + ((Math.random() * 30) | 0);
   for (let i = 0; i < n; i++) {
-    const v = 2 + Math.random() * 6;           // 초당 이동 행 수
-    const b = Math.min(255, 70 + v * 22) | 0;  // 빠를수록 밝게(가까운 눈)
-    snow.push({ x: Math.random() * cols, y: Math.random() * rows, v,
-      ch: chs[(Math.random() * chs.length) | 0],
-      color: `rgb(${b},${b},${Math.min(255, b + 20)})`, phase: Math.random() * 6.28 });
+    const a = Math.random() * 6.28, s = 80 + Math.random() * 220;
+    fireworks.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, life: 1,
+      decay: 0.5 + Math.random() * 0.6, hue: (hue + Math.random() * 40) % 360,
+      ch: pick(['*', '+', '.', 'o', 'x']) });
   }
 }
+canvas.addEventListener('pointerdown', e => spawnFirework(e.clientX, e.clientY));
 
-function put(c, r, ch, color) {
+function putCell(c, r, ch, color, glow) {
   if (c < 0 || c >= cols || r < 0 || r >= rows) return;
   const i = r * cols + c;
-  charBuf[i] = ch; colorBuf[i] = color; depthBuf[i] = 1e9;
+  charBuf[i] = ch; colorBuf[i] = color; glowBuf[i] = glow; depthBuf[i] = 1e9;
 }
 
-// ---------- 4. 매 프레임 렌더링 ----------
+// ---------- 배치 계산 ----------
+function layout(W, H) {
+  const len = Math.max(CONFIG.mainText.length, 1);
+  const fs = Math.min(46, W * 0.92 / (len * 0.85));
+  const textH = fs * (CONFIG.message ? 3.4 : 2.6);
+  const treePx = Math.min((H - textH) * 0.8, W);
+  const top = Math.max(CH * 4, (H - (treePx * 1.15 + textH)) / 2 + CH * 2);
+  return { fs, treePx, top, cx: W / 2, textY: top + treePx * 1.15 + fs * 0.6 };
+}
+
+// ---------- 문구 ----------
+function drawText(t, L, W) {
+  const { fs, textY } = L, txt = CONFIG.mainText;
+  const shown = Math.min(txt.length, Math.floor((t - startT) * 10));
+  const sp = fs * 0.85, x0 = W / 2 - (txt.length - 1) * sp / 2;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.font = `bold ${fs}px ${MONO}`;
+  for (let i = 0; i < shown; i++) {
+    if (txt[i] === ' ') continue;
+    const hue = (i * 24 + t * 80) % 360;
+    const y = textY + Math.sin(t * 3 + i * 0.55) * fs * 0.12;
+    ctx.shadowBlur = fs * 0.5;
+    ctx.fillStyle = ctx.shadowColor = `hsl(${hue | 0},100%,65%)`;
+    ctx.fillText(txt[i], x0 + i * sp, y);
+  }
+  if (shown >= txt.length) {
+    const p = 0.6 + 0.4 * Math.sin(t * 2.5);
+    ctx.font = `bold ${fs * 0.7}px ${MONO}`;
+    ctx.shadowBlur = fs * 0.6 * p;
+    ctx.shadowColor = 'rgba(255,200,90,1)';
+    ctx.fillStyle = `rgba(255,${210 + 30 * p | 0},120,${0.7 + 0.3 * p})`;
+    ctx.fillText(CONFIG.subText.split('').join(' '), W / 2, textY + fs * 1.05);
+    if (CONFIG.message) {
+      ctx.shadowBlur = 0;
+      ctx.font = `${Math.max(11, fs * 0.32)}px ${MONO}`;
+      ctx.fillStyle = 'rgba(180,190,220,0.75)';
+      ctx.fillText(CONFIG.message, W / 2, textY + fs * 1.75);
+    }
+  }
+  ctx.shadowBlur = 0;
+}
+
+// ---------- 매 프레임 ----------
 function frame(now) {
-  const t = now / 1000;
-  const dt = Math.min(0.05, t - last); last = t;
+  const t = now / 1000, dt = Math.min(0.05, t - last); last = t;
   const W = innerWidth, H = innerHeight;
+  const L = layout(W, H), { treePx, top, cx } = L;
 
-  depthBuf.fill(-1e9);
-  charBuf.fill(null);
+  depthBuf.fill(-1e9); charBuf.fill(null); glowBuf.fill(0);
 
-  // 눈 (가장 뒤)
-  for (const p of snow) {
+  // 1) 배경 별
+  for (const s of bgStars) {
+    const b = 0.3 + 0.7 * Math.max(0, Math.sin(t * s.sp + s.ph));
+    const v = (120 * b + 40) | 0;
+    const i = s.r * cols + s.c;
+    charBuf[i] = b > 0.85 ? '+' : s.ch;
+    colorBuf[i] = `rgb(${v},${v},${Math.min(255, v + 40)})`;
+  }
+
+  // 2) 뒤쪽 눈
+  for (const p of snowBack) {
     p.y += p.v * dt;
-    p.x += Math.sin(t * 0.8 + p.phase) * p.v * 0.12 * dt;
+    p.x += Math.sin(t * 0.7 + p.ph) * 0.25 * dt;
     if (p.y >= rows) { p.y -= rows; p.x = Math.random() * cols; }
     if (p.x < 0) p.x += cols;
     if (p.x >= cols) p.x -= cols;
+    const v = (90 + p.v * 25) | 0;
     const i = (p.y | 0) * cols + (p.x | 0);
-    charBuf[i] = p.ch; colorBuf[i] = p.color;
+    charBuf[i] = p.ch;
+    colorBuf[i] = `rgb(${v},${v},${Math.min(255, v + 30)})`;
   }
 
-  // 트리 (Y축 회전 + 원근 투영 + z-버퍼)
-  const treePx = Math.min(H * 0.75, W * 1.05);
-  const cx = W / 2, top = (H - treePx * 1.12) / 2;
-  const ang = t * 0.7, ca = Math.cos(ang), sa = Math.sin(ang);
-
+  // 3) 트리 (회전 + 원근 + z-버퍼)
+  const ang = t * CONFIG.rotateSpeed, ca = Math.cos(ang), sa = Math.sin(ang);
   for (const p of points) {
-    const xr = p.x * ca + p.z * sa;
-    const zr = -p.x * sa + p.z * ca;
+    const xr = p.x * ca + p.z * sa, zr = -p.x * sa + p.z * ca;
     const persp = 2.5 / (2.5 - zr);
     const c = ((cx + xr * treePx * persp) / CW) | 0;
     const r = ((top + p.y * treePx) / CH) | 0;
@@ -130,19 +201,30 @@ function frame(now) {
     const i = r * cols + c;
     if (zr <= depthBuf[i]) continue;
     depthBuf[i] = zr;
-
-    const k = Math.max(0, Math.min(1, 0.5 + zr / 0.9 + xr * 0.6)); // 앞쪽·측면 밝기
+    glowBuf[i] = 0;
+    const k = Math.max(0, Math.min(1, 0.5 + zr / 0.9 + xr * 0.6));
 
     if (p.type === 'leaf') {
+      if (Math.sin(t * 1.3 + p.ph * 17) > 0.998) {          // 무작위 반짝임
+        charBuf[i] = '+'; colorBuf[i] = '#ffffff'; glowBuf[i] = 1; continue;
+      }
       charBuf[i] = LEAF[Math.min(LEAF.length - 1, (k * LEAF.length) | 0)];
-      const b = 0.25 + 0.75 * k;
-      colorBuf[i] = `rgb(${(30 + p.g * 0.25) * b | 0},${p.g * b | 0},${(40 + p.g * 0.2) * b | 0})`;
-    } else if (p.type === 'light') {
-      const tw = 0.55 + 0.45 * Math.sin(t * 4 + p.phase);   // 깜빡임
-      const b = (0.3 + 0.7 * k) * tw + 0.15;
-      charBuf[i] = tw > 0.7 ? '@' : (tw > 0.4 ? 'o' : '*');
+      const b = 0.22 + 0.78 * k;
+      colorBuf[i] = `rgb(${(25 + p.g * 0.25) * b | 0},${p.g * b | 0},${(45 + p.g * 0.25) * b | 0})`;
+    } else if (p.type === 'orn') {
+      const tw = 0.55 + 0.45 * Math.sin(t * 3 + p.ph);
+      const b = Math.min(1.2, (0.35 + 0.75 * k) * tw + 0.15);
+      charBuf[i] = tw > 0.75 ? '@' : (tw > 0.4 ? 'O' : 'o');
       const [R, G, B] = p.color;
       colorBuf[i] = `rgb(${Math.min(255, R * b) | 0},${Math.min(255, G * b) | 0},${Math.min(255, B * b) | 0})`;
+      glowBuf[i] = k > 0.45 ? 1 : 0;
+    } else if (p.type === 'garland') {
+      const chase = 0.5 + 0.5 * Math.sin(t * 6 - p.idx * 0.35);   // 흐르는 불빛
+      const hue = (p.idx * 9 + t * 90) % 360;                    // 무지개
+      const l = (25 + 45 * chase * (0.35 + 0.65 * k)) | 0;
+      charBuf[i] = chase > 0.6 ? '*' : '·';
+      colorBuf[i] = `hsl(${hue | 0},100%,${l}%)`;
+      glowBuf[i] = (chase > 0.6 && k > 0.4) ? 1 : 0;
     } else {
       charBuf[i] = k > 0.5 ? '#' : '|';
       const b = 0.35 + 0.65 * k;
@@ -150,26 +232,103 @@ function frame(now) {
     }
   }
 
-  // 꼭대기 별 (회전축 위라 고정)
-  const sc = (cx / CW) | 0, sr = ((top + 0.02 * treePx) / CH) | 0;
-  const pulse = 0.7 + 0.3 * Math.sin(t * 3);
-  const yel = `rgb(${255 * pulse | 0},${210 * pulse | 0},${90 * pulse | 0})`;
-  const dim = `rgb(${200 * pulse | 0},${160 * pulse | 0},${70 * pulse | 0})`;
-  [[-1,-1,'\\'],[0,-1,'|'],[1,-1,'/'],[-2,0,'-'],[-1,0,'-'],[1,0,'-'],[2,0,'-'],
-   [-1,1,'/'],[1,1,'\\']].forEach(([dx, dy, ch]) => put(sc + dx, sr + dy, ch, dim));
-  put(sc, sr, '*', yel);
+  // 4) 바닥 눈 더미
+  const gr = (((top + 1.09 * treePx) / CH) | 0) + 1;
+  const gw = (0.42 * treePx * 1.25 / CW) | 0, gc = (cx / CW) | 0;
+  for (let dx = -gw; dx <= gw; dx++) {
+    const h = Math.abs(Math.sin(dx * 12.9898) * 43758.5453) % 1;
+    const edge = 1 - Math.abs(dx) / Math.max(gw, 1);
+    const v = (80 + 140 * edge) | 0;
+    putCell(gc + dx, gr, edge > 0.5 ? (h < 0.5 ? '~' : '-') : (h < 0.5 ? '.' : '_'),
+      `rgb(${v},${v},${Math.min(255, v + 35)})`, 0);
+  }
 
-  // 화면 출력
-  ctx.fillStyle = '#0b0f1a';
+  // 5) 별 빛줄기 (회전)
+  const sc = (cx / CW) | 0, sr = ((top + 0.015 * treePx) / CH) | 0;
+  const rayCh = a => {
+    const d = ((a % Math.PI) + Math.PI) % Math.PI;
+    if (d < Math.PI / 8 || d > 7 * Math.PI / 8) return '-';
+    if (d < 3 * Math.PI / 8) return '\\';
+    if (d < 5 * Math.PI / 8) return '|';
+    return '/';
+  };
+  for (let k = 0; k < 8; k++) {
+    const a = k * Math.PI / 4 + t * 1.2, len = k % 2 ? 2 : 3;
+    for (let s = 1; s <= len; s++) {
+      const f = 1 - s / (len + 1);
+      putCell(sc + Math.round(Math.cos(a) * s * 1.6), sr + Math.round(Math.sin(a) * s * 0.8),
+        rayCh(a), `rgba(255,${200 + 40 * f | 0},${90 + 100 * f | 0},${0.4 + 0.6 * f})`, 1);
+    }
+  }
+
+  // ---- 그리기 ----
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = bgGrad;
   ctx.fillRect(0, 0, W, H);
+  ctx.font = `${FONT_PX}px ${MONO}`;
+  ctx.textBaseline = 'top';
+  ctx.textAlign = 'left';
+  const glows = [];
   for (let r = 0; r < rows; r++) {
     for (let c = 0; c < cols; c++) {
       const i = r * cols + c, ch = charBuf[i];
       if (!ch) continue;
+      if (glowBuf[i]) { glows.push(i); continue; }
       ctx.fillStyle = colorBuf[i];
       ctx.fillText(ch, c * CW, r * CH);
     }
   }
+  ctx.shadowBlur = FONT_PX * 0.9;                       // 발광 처리
+  for (const i of glows) {
+    ctx.fillStyle = ctx.shadowColor = colorBuf[i];
+    ctx.fillText(charBuf[i], (i % cols) * CW, ((i / cols) | 0) * CH);
+  }
+
+  // 별 본체
+  const pulse = 0.75 + 0.25 * Math.sin(t * 3);
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.font = `bold ${FONT_PX * 2.4}px ${MONO}`;
+  ctx.shadowBlur = 25 * pulse;
+  ctx.shadowColor = 'rgba(255,210,90,1)';
+  ctx.fillStyle = `rgb(255,${220 + 35 * pulse | 0},${120 + 80 * pulse | 0})`;
+  ctx.fillText('★', sc * CW + CW / 2, sr * CH + CH / 2);
+
+  // 6) 앞쪽 큰 눈
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'top';
+  ctx.shadowBlur = 6;
+  ctx.shadowColor = 'rgba(200,220,255,0.8)';
+  for (const p of snowFront) {
+    p.y += p.v * dt;
+    p.x += Math.sin(t + p.ph) * 20 * dt;
+    if (p.y > H + 20) { p.y = -20; p.x = Math.random() * W; }
+    ctx.font = `${p.size}px ${MONO}`;
+    ctx.fillStyle = `rgba(235,242,255,${p.a})`;
+    ctx.fillText(p.ch, p.x, p.y);
+  }
+
+  // 7) 불꽃놀이
+  if (CONFIG.autoFireworks && t > nextFw) {
+    const left = Math.random() < 0.5;
+    spawnFirework(W * (left ? 0.08 + Math.random() * 0.25 : 0.67 + Math.random() * 0.25),
+                  H * (0.1 + Math.random() * 0.3));
+    nextFw = t + 2.5 + Math.random() * 3;
+  }
+  ctx.font = `bold ${FONT_PX * 1.2}px ${MONO}`;
+  ctx.shadowBlur = 10;
+  for (let j = fireworks.length - 1; j >= 0; j--) {
+    const f = fireworks[j];
+    f.vy += 120 * dt; f.vx *= 0.985; f.vy *= 0.985;
+    f.x += f.vx * dt; f.y += f.vy * dt; f.life -= f.decay * dt;
+    if (f.life <= 0) { fireworks.splice(j, 1); continue; }
+    ctx.fillStyle = ctx.shadowColor = `hsla(${f.hue | 0},100%,${55 + 25 * f.life | 0}%,${f.life})`;
+    ctx.fillText(f.ch, f.x, f.y);
+  }
+
+  // 8) 문구
+  drawText(t, L, W);
+
   requestAnimationFrame(frame);
 }
 
